@@ -4,10 +4,12 @@
   -- transform varchar
   {% set re = modules.re %}
   {% set data_type = re.sub('(?:varchar|character varying)(?:\(\d+\))?', 'string', col_type) %}
+  {% set data_type = re.sub('(?<![a-z_])list<', 'array<', data_type) %}
 
   -- transform array and map
   {%- if 'array' in data_type or 'map' in data_type -%}
     {% set data_type = data_type.replace('(', '<').replace(')', '>') -%}
+    {% set data_type = re.sub('decimal<(\d+),\s*(\d+)>', 'decimal(\\1,\\2)', data_type) -%}
   {%- endif -%}
 
   -- transform int
@@ -17,13 +19,8 @@
 
   -- transform timestamp
   {%- if table_type == 'iceberg' -%}
-    {%- if 'timestamp' in data_type -%}
-        {% set data_type = 'timestamp' -%}
-    {%- endif -%}
-
-    {%- if 'binary' in data_type -%}
-        {% set data_type = 'binary' -%}
-    {%- endif -%}
+    {% set data_type = re.sub('timestamp(?:[(<]\d+[)>])?(?: with time zone)?', 'timestamp', data_type) %}
+    {% set data_type = data_type.replace('varbinary', 'binary') %}
   {%- endif -%}
 
   {{ return(data_type) }}

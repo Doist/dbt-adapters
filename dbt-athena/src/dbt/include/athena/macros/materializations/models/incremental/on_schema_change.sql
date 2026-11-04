@@ -56,8 +56,23 @@
   {% do log(schema_change_message) %}
 {% endmacro %}
 
+{% macro iceberg_is_type_promotion(old_type, new_type) -%}
+  {%- set re = modules.re -%}
+  {%- set old = old_type | lower | replace(' ', '') -%}
+  {%- set new = new_type | lower | replace(' ', '') -%}
+
+  {%- if (old, new) in [('int', 'bigint'), ('integer', 'bigint'), ('float', 'double'), ('real', 'double')] -%}
+    {{ return(true) }}
+  {%- endif -%}
+
+  {%- set o = re.match('^decimal\((\d+),(\d+)\)$', old) -%}
+  {%- set n = re.match('^decimal\((\d+),(\d+)\)$', new) -%}
+  {{ return(o is not none and n is not none and o.group(2) == n.group(2) and (n.group(1) | int) > (o.group(1) | int)) }}
+{%- endmacro %}
+
 {% macro athena__alter_column_type(relation, column_name, new_column_type) -%}
   {#
+    Iceberg type promotions are metadata-only. Any other change:
     1. Create a new column (w/ temp name and correct type)
     2. Copy data over to it
     3. Drop the existing column
@@ -66,21 +81,25 @@
   {%- set table_type = resolve_table_type() -%}
   {%- set tmp_column = column_name + '__dbt_alter' -%}
   {%- set new_ddl_data_type = ddl_data_type(new_column_type, table_type) -%}
+  {%- set existing = adapter.get_columns_in_relation(relation) | selectattr('name', 'equalto', column_name) | list -%}
 
-  {#- do alter_relation_add_columns(relation, [ tmp_column ], table_type) -#}
+  {%- if table_type == 'iceberg' and existing and iceberg_is_type_promotion(existing[0].dtype, new_ddl_data_type) -%}
+    {%- do alter_relation_rename_column(relation, column_name, column_name, new_column_type, table_type) -%}
+    {{ return(none) }}
+  {%- endif -%}
+
   {%- set add_column_query -%}
-    alter {{ relation.type }} {{ relation.render_pure() }} add columns({{ tmp_column }} {{ new_ddl_data_type }});
+    alter {{ relation.type }} {{ relation.render_hive() }} add columns (`{{ tmp_column }}` {{ new_ddl_data_type }})
   {%- endset -%}
   {%- do run_query(add_column_query) -%}
 
   {%- set update_query -%}
-    update {{ relation.render_pure() }} set {{ tmp_column }} = cast({{ column_name }} as {{ new_column_type }});
+    update {{ relation }} set "{{ tmp_column }}" = cast("{{ column_name }}" as {{ dml_data_type(new_column_type) }})
   {%- endset -%}
   {%- do run_query(update_query) -%}
 
-  {#- do alter_relation_drop_columns(relation, [ column_name ]) -#}
   {%- set drop_column_query -%}
-    alter {{ relation.type }} {{ relation.render_pure() }} drop column {{ column_name }};
+    alter {{ relation.type }} {{ relation.render_hive() }} drop column `{{ column_name }}`
   {%- endset -%}
   {%- do run_query(drop_column_query) -%}
 
