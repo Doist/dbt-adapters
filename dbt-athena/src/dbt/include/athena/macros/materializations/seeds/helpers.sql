@@ -1,4 +1,7 @@
 {% macro default__reset_csv_table(model, full_refresh, old_relation, agate_table) %}
+    {%- if adapter.is_s3_tables_database(model.database) -%}
+      {{ return(s3_tables_load_seed(model, agate_table, old_relation, reuse=not full_refresh)) }}
+    {%- endif -%}
     {% set sql = "" %}
     -- No truncate in Athena so always drop CSV table and recreate
     {{ drop_relation(old_relation) }}
@@ -193,7 +196,10 @@
 
   {%- set seed_by_insert = config.get('seed_by_insert', False) | as_bool -%}
 
-  {%- if seed_by_insert -%}
+  {%- if adapter.is_s3_tables_database(model.database) -%}
+    {% do log('seed into S3 Tables...') %}
+    {%- set sql_table = s3_tables_load_seed(model, agate_table) -%}
+  {%- elif seed_by_insert -%}
     {% do log('seed by insert...') %}
     {%- set sql_table = create_csv_table_insert(model, agate_table) -%}
   {%- else -%}
@@ -207,9 +213,149 @@
 {# Overwrite to satisfy dbt-core logic #}
 {% macro athena__load_csv_rows(model, agate_table) %}
     {%- set seed_by_insert = config.get('seed_by_insert', False) | as_bool -%}
-  {%- if seed_by_insert %}
+  {%- if seed_by_insert and not adapter.is_s3_tables_database(model.database) %}
     {{ default__load_csv_rows(model, agate_table) }}
   {%- else -%}
     select 1
   {% endif %}
+{% endmacro %}
+
+{% macro s3_tables_load_seed(model, agate_table, old_relation=none, reuse=false) %}
+  {%- set relation = this.incorporate(type='table') -%}
+  {%- set columns = s3_tables_seed_columns(agate_table) -%}
+  {%- set batches = s3_tables_seed_batches(agate_table.rows, config.get('seed_batch_chars', 200000) | int) -%}
+  {%- set in_place = reuse and old_relation is not none and s3_tables_seed_columns_match(old_relation, columns) -%}
+
+  {%- if old_relation is not none and not in_place -%}
+    {%- do drop_relation(old_relation) -%}
+  {%- endif -%}
+
+  {%- set load_relation = make_temp_relation(relation) if in_place else relation -%}
+  {%- if in_place -%}
+    {%- do drop_relation(load_relation) -%}
+  {%- endif -%}
+
+  {%- set first = batches[0] if batches else [] -%}
+  {%- set ctas = create_table_as(false, load_relation, s3_tables_seed_select(columns, first)) -%}
+  {%- do adapter.add_query(ctas, bindings=s3_tables_seed_bindings(first), abridge_sql_log=True) -%}
+
+  {%- set cols_csv = columns | map(attribute='quoted') | join(', ') -%}
+  {%- for batch in batches[1:] -%}
+    {%- set insert_sql -%}
+      insert into {{ load_relation }} ({{ cols_csv }})
+      {{ s3_tables_seed_select(columns, batch) }}
+    {%- endset -%}
+    {%- do adapter.add_query(insert_sql, bindings=s3_tables_seed_bindings(batch), abridge_sql_log=True) -%}
+  {%- endfor -%}
+
+  {%- if in_place -%}
+    {%- do adapter.add_query('delete from ' ~ relation) -%}
+    {%- do adapter.add_query('insert into ' ~ relation ~ ' (' ~ cols_csv ~ ') select ' ~ cols_csv ~ ' from ' ~ load_relation) -%}
+    {%- do drop_relation(load_relation) -%}
+  {%- endif -%}
+
+  {%- set lf_tags_config = config.get('lf_tags_config') -%}
+  {%- if lf_tags_config is not none -%}
+    {%- do adapter.add_lf_tags(relation, lf_tags_config) -%}
+  {%- endif -%}
+  {%- set lf_grants = config.get('lf_grants') -%}
+  {%- if lf_grants is not none -%}
+    {%- do adapter.apply_lf_grants(relation, lf_grants) -%}
+  {%- endif -%}
+
+  {{ return(ctas) }}
+{% endmacro %}
+
+
+{% macro s3_tables_seed_columns(agate_table) %}
+  {%- set column_override = config.get('column_types', {}) -%}
+  {%- set quote_seed_column = config.get('quote_columns', None) -%}
+  {%- set columns = [] -%}
+
+  {%- for col_name in agate_table.column_names -%}
+    {%- set inferred_type = adapter.convert_type(agate_table, loop.index0) -%}
+    {%- set type = column_override.get(col_name, inferred_type) -%}
+    {%- set type = {'string': 'varchar', 'timestamp': 'timestamp(6)'}.get(type, type) -%}
+    {%- do columns.append({
+      'name': col_name | string,
+      'quoted': adapter.quote_seed_column(col_name | string, quote_seed_column),
+      'type': type,
+    }) -%}
+  {%- endfor -%}
+
+  {{ return(columns) }}
+{% endmacro %}
+
+
+{% macro s3_tables_seed_batches(rows, max_chars) %}
+  {%- set batches = [] -%}
+  {%- set ns = namespace(batch=[], size=0) -%}
+
+  {%- for row in rows -%}
+    {%- set sizes = [] -%}
+    {%- for value in row -%}
+      {%- do sizes.append(((value | string).encode('utf-8') | length) +(value | string).count("'") + 16) -%}
+    {%- endfor -%}
+    {%- set row_size = (sizes | sum) + 4 -%}
+
+    {%- if ns.batch and ns.size + row_size > max_chars -%}
+      {%- do batches.append(ns.batch) -%}
+      {%- set ns.batch = [] -%}
+      {%- set ns.size = 0 -%}
+    {%- endif -%}
+
+    {%- do ns.batch.append(row) -%}
+    {%- set ns.size = ns.size + row_size -%}
+  {%- endfor -%}
+
+  {%- if ns.batch -%}
+    {%- do batches.append(ns.batch) -%}
+  {%- endif -%}
+
+  {{ return(batches) }}
+{% endmacro %}
+
+
+{% macro s3_tables_seed_bindings(rows) %}
+  {%- set bindings = [] -%}
+  {%- for row in rows -%}
+    {%- do bindings.extend(row) -%}
+  {%- endfor -%}
+  {{ return(bindings if bindings else none) }}
+{% endmacro %}
+
+
+{% macro s3_tables_seed_select(columns, rows) -%}
+  {%- set aliases = columns | map(attribute='quoted') | join(', ') -%}
+  select
+  {%- for col in columns %}
+    cast({{ col.quoted }} as {{ col.type }}) as {{ col.quoted }}{{ ',' if not loop.last }}
+  {%- endfor %}
+  {%- if rows %}
+  from (values
+    {%- for row in rows %}
+    ({%- for col in columns -%}%s{{ ', ' if not loop.last }}{%- endfor -%}){{ ',' if not loop.last }}
+    {%- endfor %}
+  ) as t({{ aliases }})
+  {%- else %}
+  from (values ({%- for col in columns -%}null{{ ', ' if not loop.last }}{%- endfor -%})) as t({{ aliases }})
+  where false
+  {%- endif %}
+{%- endmacro %}
+
+
+{% macro s3_tables_seed_columns_match(relation, columns) %}
+  {%- set existing = adapter.get_columns_in_relation(relation) -%}
+  {%- if existing | length != columns | length -%}
+    {{ return(false) }}
+  {%- endif -%}
+
+  {%- for col in columns -%}
+    {%- set current = existing[loop.index0] -%}
+    {%- if current.name | lower != col.name | lower or current.dtype | lower != ddl_data_type(col.type, 'iceberg') | trim | lower -%}
+      {{ return(false) }}
+    {%- endif -%}
+  {%- endfor -%}
+
+  {{ return(true) }}
 {% endmacro %}
