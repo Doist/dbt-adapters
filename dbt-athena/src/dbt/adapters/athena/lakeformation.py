@@ -64,20 +64,34 @@ class LfTagsManager:
         if self.catalog_id:
             table_dict["CatalogId"] = self.catalog_id
         table_resource = {"Table": table_dict}
-        existing_lf_tags = self.lf_client.get_resource_lf_tags(Resource=table_resource)
+        existing_lf_tags = self.lf_client.get_resource_lf_tags(
+            Resource=table_resource, ShowAssignedLFTags=True
+        )
+        # Column tags go first: until the table tag lands, columns keep the stricter inherited value.
+        self._apply_lf_tags_columns()
         self._remove_lf_tags_columns(existing_lf_tags)
         self._apply_lf_tags_table(table_resource, existing_lf_tags)
-        self._apply_lf_tags_columns()
 
     @staticmethod
     def _column_tags_to_remove(
-        lf_tags_columns: List[ColumnLFTagTypeDef], lf_inherited_tags: Set[str]
+        lf_tags_columns: List[ColumnLFTagTypeDef],
+        lf_inherited_tags: Set[str],
+        lf_tags_columns_config: Optional[Dict[str, Dict[str, List[str]]]] = None,
     ) -> Dict[str, Dict[str, List[str]]]:
         to_remove = {}
+        configured = {
+            (tag_key, column.lower())
+            for tag_key, tag_config in (lf_tags_columns_config or {}).items()
+            for columns in tag_config.values()
+            for column in columns
+        }
 
         for column in lf_tags_columns:
             non_inherited_tags = [
-                tag for tag in column["LFTags"] if not tag["TagKey"] in lf_inherited_tags
+                tag
+                for tag in column["LFTags"]
+                if tag["TagKey"] not in lf_inherited_tags
+                and (tag["TagKey"], column["Name"].lower()) not in configured
             ]
             for tag in non_inherited_tags:
                 tag_key = tag["TagKey"]
@@ -96,7 +110,7 @@ class LfTagsManager:
         logger.debug(f"COLUMNS: {lf_tags_columns}")
         if lf_tags_columns:
             to_remove = LfTagsManager._column_tags_to_remove(
-                lf_tags_columns, self.lf_inherited_tags
+                lf_tags_columns, self.lf_inherited_tags, self.lf_tags_columns
             )
             logger.debug(f"TO REMOVE: {to_remove}")
             for tag_key, tag_config in to_remove.items():

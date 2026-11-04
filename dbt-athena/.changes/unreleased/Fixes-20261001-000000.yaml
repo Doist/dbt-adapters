@@ -1,0 +1,6 @@
+kind: Fixes
+body: Apply LF column tags before table tags and stop removing column tags that the config re-adds, so a column never falls back to a looser inherited tag mid-run.
+time: 2026-10-01T00:00:00.000000+00:00
+custom:
+    Author: giuliano
+    Issue: "410"
