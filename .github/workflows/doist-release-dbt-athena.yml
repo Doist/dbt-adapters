@@ -1,0 +1,90 @@
+name: "Doist: release dbt-athena"
+
+on:
+    push:
+        tags:
+            - "dbt-athena-v*"
+
+permissions: {}
+
+jobs:
+    release:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        env:
+            TAG: ${{ github.ref_name }}
+        steps:
+            -   uses: actions/checkout@v7
+                with:
+                    persist-credentials: false
+
+            -   uses: astral-sh/setup-uv@v10.3.3
+                with:
+                    version: "0.13.5"
+                    enable-cache: false
+
+            -   name: Run the unit tests
+                working-directory: dbt-athena
+                run: >-
+                    uv run --isolated --no-project --python 3.12 --with-editable .
+                    --with 'dbt-tests-adapter>=1.11.0,<2.0' --with 'moto~=5.0.13'
+                    --with 'pyparsing~=3.1.4' --with 'pytest>=7.0,<8.0' --with 'pytest-xdist~=3.6'
+                    python -m pytest tests/unit -n auto
+
+            -   name: Build the wheel
+                working-directory: dbt-athena
+                run: uv build --wheel --out-dir "$RUNNER_TEMP/dist"
+
+            -   name: Check the wheel version against the tag
+                run: |
+                    version="${TAG#dbt-athena-v}"
+                    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+doist\.[0-9]+$ ]]; then
+                        echo "::error::Tag $TAG is not dbt-athena-v<X.Y.Z>+doist.<N>"
+                        exit 1
+                    fi
+
+                    wheel="dbt_athena-${version}-py3-none-any.whl"
+                    path="$RUNNER_TEMP/dist/$wheel"
+                    if [[ ! -f "$path" ]]; then
+                        echo "::error::Expected $wheel, the build made: $(ls "$RUNNER_TEMP/dist")"
+                        exit 1
+                    fi
+
+                    metadata_version=$(unzip -p "$path" '*.dist-info/METADATA' | sed -n 's/^Version: //p')
+                    if [[ "$metadata_version" != "$version" ]]; then
+                        echo "::error::Wheel METADATA has version $metadata_version, the tag has $version"
+                        exit 1
+                    fi
+
+                    echo "WHEEL=$wheel" >> "$GITHUB_ENV"
+                    echo "WHEEL_PATH=$path" >> "$GITHUB_ENV"
+                    echo "SHA256=$(sha256sum "$path" | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
+
+            -   name: Create the release
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                run: |
+                    url="https://github.com/$GITHUB_REPOSITORY/releases/download/${TAG//+/%2B}/${WHEEL//+/%2B}"
+                    version="${TAG#dbt-athena-v}"
+                    notes=$(printf 'Pin in `dbt/pyproject.toml` of Doist/data:\n\n```toml\n"dbt-athena==%s"\n\n[tool.uv.sources]\ndbt-athena = { url = "%s" }\n```\n\nsha256: `%s`\n' "$version" "$url" "$SHA256")
+                    gh release create "$TAG" "$WHEEL_PATH" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes "$notes"
+                    echo "URL=$url" >> "$GITHUB_ENV"
+
+            -   name: Check the asset name and URL
+                env:
+                    GH_TOKEN: ${{ github.token }}
+                run: |
+                    asset=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/${TAG//+/%2B}" --jq '.assets[0] | [.id, .name] | @tsv')
+                    asset_id=$(cut -f 1 <<< "$asset")
+                    asset_name=$(cut -f 2 <<< "$asset")
+                    if [[ "$asset_name" != "$WHEEL" ]]; then
+                        echo "GitHub stored the asset as $asset_name, renaming it to $WHEEL"
+                        gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" -f name="$WHEEL" > /dev/null
+                    fi
+
+                    download_url=$(gh api "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" --jq .browser_download_url)
+                    if [[ "$download_url" != "$URL" ]]; then
+                        echo "::error::The asset URL is $download_url, the release notes give $URL"
+                        exit 1
+                    fi
