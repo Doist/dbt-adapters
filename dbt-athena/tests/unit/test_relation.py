@@ -54,6 +54,20 @@ class TestAthenaRelation:
         )
         assert relation.render_hive() == f"`{DATABASE_NAME}`.`{TABLE_NAME}`"
 
+    def test_render_hive_keeps_the_s3_tables_catalog(self):
+        relation = AthenaRelation.create(
+            identifier=TABLE_NAME,
+            database="s3tablescatalog/my-bucket",
+            schema=DATABASE_NAME,
+        )
+        assert relation.render_hive() == (
+            f"`s3tablescatalog/my-bucket`.`{DATABASE_NAME}`.`{TABLE_NAME}`"
+        )
+        assert relation.without_identifier().render_hive() == (
+            f"`s3tablescatalog/my-bucket`.`{DATABASE_NAME}`"
+        )
+        assert relation.render() == f'"s3tablescatalog/my-bucket"."{DATABASE_NAME}"."{TABLE_NAME}"'
+
     def test_render_hive_resets_quote_character_and_include_policy_after_call(self):
         relation = AthenaRelation.create(
             identifier=TABLE_NAME,

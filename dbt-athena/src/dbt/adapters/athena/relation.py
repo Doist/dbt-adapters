@@ -4,7 +4,7 @@ from typing import Dict, Optional, Set
 
 from mypy_boto3_glue.type_defs import TableTypeDef
 
-from dbt.adapters.athena.constants import LOGGER
+from dbt.adapters.athena.constants import LOGGER, S3_TABLES_GLUE_CATALOG_PREFIX
 from dbt.adapters.base.relation import BaseRelation, EventTimeFilter, InformationSchema, Policy
 
 
@@ -43,6 +43,10 @@ class AthenaRelation(BaseRelation):
     )
     require_alias: bool = False
 
+    @property
+    def is_s3_tables(self) -> bool:
+        return (self.database or "").lower().startswith(f"{S3_TABLES_GLUE_CATALOG_PREFIX}/")
+
     def render_hive(self) -> str:
         """
         Render relation with Hive format. Athena uses a Hive format for some DDL statements.
@@ -50,12 +54,16 @@ class AthenaRelation(BaseRelation):
         See:
         - https://aws.amazon.com/athena/faqs/ "Q: How do I create tables and schemas for my data on Amazon S3?"
         - https://cwiki.apache.org/confluence/display/Hive/LanguageManual+DDL
+
+        S3 Tables relations keep their catalog: AthenaCursor runs the statement in it.
         """
 
         old_quote_character = self.quote_character
         object.__setattr__(self, "quote_character", "`")  # Hive quote char
         old_include_policy = self.include_policy
-        object.__setattr__(self, "include_policy", AthenaHiveIncludePolicy())
+        object.__setattr__(
+            self, "include_policy", AthenaHiveIncludePolicy(database=self.is_s3_tables)
+        )
         rendered = self.render()
         object.__setattr__(self, "quote_character", old_quote_character)
         object.__setattr__(self, "include_policy", old_include_policy)

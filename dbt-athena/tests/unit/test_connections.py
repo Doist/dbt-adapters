@@ -296,6 +296,23 @@ class TestAthenaCursor:
             },
         )
 
+    @pytest.mark.parametrize(
+        ("query", "catalog"),
+        [
+            ("create schema if not exists `s3tablescatalog/b`.`ns`", "s3tablescatalog/b"),
+            ("alter table `S3TablesCatalog/b`.`ns`.`t` add columns (c int)", "s3tablescatalog/b"),
+            ("create schema if not exists `ns`", "my_database"),
+            ('select * from "s3tablescatalog/b"."ns"."t"', "my_database"),
+            ("show tables in `s3tablescatalog/a`.`ns` -- `s3tablescatalog/b`", "my_database"),
+        ],
+    )
+    def test_execute_runs_hive_ddl_in_the_s3_tables_catalog_it_names(
+        self, cursor, athena_client, query, catalog
+    ):
+        cursor.execute(query)
+        _, kwargs = athena_client.start_query_execution.call_args
+        assert kwargs["QueryExecutionContext"] == {"Catalog": catalog, "Database": "my_schema"}
+
     def test_execute_skips_workgroup_when_not_set(self, cursor, athena_client, credentials):
         credentials.work_group = None
         cursor.execute("SELECT NOW()")

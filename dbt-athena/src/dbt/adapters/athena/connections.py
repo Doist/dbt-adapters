@@ -231,6 +231,11 @@ def _is_api_request_error(exception: BaseException) -> bool:
     return any(error_name in str(exception) for error_name in API_REQUEST_ERROR_NAMES)
 
 
+# Athena's Hive DDL engine rejects a catalog other than the session catalog
+# ("Unsupported DDL with 2 catalogs"), so a statement that names one runs in it.
+_HIVE_S3_TABLES_CATALOG = re.compile(r"`(s3tablescatalog/[^`]+)`", re.IGNORECASE)
+
+
 class AthenaCursor:
     query: Optional[str]
     state: Optional[str]
@@ -296,11 +301,17 @@ class AthenaCursor:
         self._with_throttling_retries(self._start_execution)
         self._await_completion()
 
+    def _session_catalog(self) -> str:
+        catalogs = {c.lower() for c in _HIVE_S3_TABLES_CATALOG.findall(self.query or "")}
+        if len(catalogs) == 1:
+            return catalogs.pop()
+        return self._credentials.database
+
     def _start_execution(self) -> None:
         request = {
             "QueryString": self.query,
             "QueryExecutionContext": {
-                "Catalog": self._credentials.database,
+                "Catalog": self._session_catalog(),
                 "Database": self._credentials.schema,
             },
         }
