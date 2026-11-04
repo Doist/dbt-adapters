@@ -296,3 +296,21 @@ class TestAthenaS3TablesUnitTest(BaseS3TablesCatalog):
         assert self._table_type(s3_tables_infra, namespace, probe) is None
 
         assert len(run_dbt(["build"])) == 3
+
+    def test_unit_test_replaces_leftover_probe(
+        self, project, catalogs, s3_tables_infra, namespace
+    ):
+        write_config_file(catalogs, project.project_root, "catalogs.yml")
+        database = s3_tables_infra["database"]
+        probe = "s3t_unit_child_filters__dbt_tmp"
+
+        # A killed run leaves the probe behind; the next run must replace it.
+        project.run_sql(
+            f'create table "{database}"."{namespace}"."{probe}" '
+            "with (table_type='iceberg', is_external=false, format='parquet') "
+            "as select 1 as leftover"
+        )
+        assert self._table_type(s3_tables_infra, namespace, probe) == "customer"
+
+        assert len(run_dbt(["test", "--select", "test_type:unit"])) == 1
+        assert self._table_type(s3_tables_infra, namespace, probe) is None

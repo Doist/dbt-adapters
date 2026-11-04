@@ -47,6 +47,11 @@
     {{ get_assert_columns_equivalent(compiled_code) }}
   {%- endif -%}
 
+  {#- Athena has no CREATE OR REPLACE: a temporary relation left by a killed run fails the CTAS. -#}
+  {%- if temporary -%}
+    {%- do adapter.drop_relation(relation) -%}
+  {%- endif -%}
+
   {%- if is_s3_tables -%}
     {# S3 Tables manages its own storage; never delete directly from S3 #}
   {%- elif native_drop and table_type == 'iceberg' -%}
