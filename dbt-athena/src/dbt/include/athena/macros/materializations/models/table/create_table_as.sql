@@ -173,77 +173,72 @@
 {%- endmacro -%}
 
 {% macro create_table_as_with_partitions(temporary, relation, compiled_code, language='sql') -%}
+  {%- set tmp_relation = api.Relation.create(
+      identifier=relation.identifier ~ '__tmp_not_partitioned',
+      schema=relation.schema,
+      database=relation.database,
+      s3_path_table_part=relation.identifier ~ '__tmp_not_partitioned',
+      type='table'
+  ) -%}
 
-    {%- set tmp_relation = api.Relation.create(
-            identifier=relation.identifier ~ '__tmp_not_partitioned',
-            schema=relation.schema,
-            database=relation.database,
-            s3_path_table_part=relation.identifier ~ '__tmp_not_partitioned' ,
-            type='table'
-        )
-    -%}
+  {%- do drop_relation(tmp_relation) -%}
 
-    {%- if tmp_relation is not none -%}
-      {%- do drop_relation(tmp_relation) -%}
+  {%- do log('CREATE NON-PARTITIONED STAGING TABLE: ' ~ tmp_relation) -%}
+  {%- do run_query(create_table_as(temporary, tmp_relation, compiled_code, language, true)) -%}
+
+  {%- set dest_columns = adapter.get_columns_in_relation(tmp_relation) -%}
+  {%- set dest_cols_csv = dest_columns | map(attribute='quoted') | join(', ') -%}
+  {%- set select_from_tmp = 'select ' ~ dest_cols_csv ~ ' from ' ~ tmp_relation -%}
+
+  {%- if config.get('partitioned_by') -%}
+    {%- set partitions_batches = get_partition_batches(sql=tmp_relation, as_subquery=False) -%}
+  {%- else -%}
+    {%- set partitions_batches = [] -%}
+  {%- endif -%}
+  {%- do log('BATCHES TO PROCESS: ' ~ partitions_batches | length) -%}
+
+  {%- if partitions_batches | length == 0 -%}
+    {%- do run_query(create_table_as(temporary, relation, select_from_tmp, language)) -%}
+  {%- endif -%}
+
+  {%- for batch in partitions_batches -%}
+    {%- do log('BATCH PROCESSING: ' ~ loop.index ~ ' OF ' ~ partitions_batches | length) -%}
+    {%- if loop.first -%}
+      {%- do run_query(create_table_as(temporary, relation, select_from_tmp ~ ' where ' ~ batch, language)) -%}
+    {%- else -%}
+      {%- do run_query('insert into ' ~ relation ~ ' (' ~ dest_cols_csv ~ ') ' ~ select_from_tmp ~ ' where ' ~ batch) -%}
     {%- endif -%}
+  {%- endfor -%}
 
-    {%- do log('CREATE NON-PARTITIONED STAGING TABLE: ' ~ tmp_relation) -%}
-    {%- do run_query(create_table_as(temporary, tmp_relation, compiled_code, language, true)) -%}
-
-    {% set partitions_batches = get_partition_batches(sql=tmp_relation, as_subquery=False) %}
-    {% do log('BATCHES TO PROCESS: ' ~ partitions_batches | length) %}
-
-    {%- set dest_columns = adapter.get_columns_in_relation(tmp_relation) -%}
-    {%- set dest_cols_csv = dest_columns | map(attribute='quoted') | join(', ') -%}
-
-    {%- for batch in partitions_batches -%}
-        {%- do log('BATCH PROCESSING: ' ~ loop.index ~ ' OF ' ~ partitions_batches | length) -%}
-
-        {%- if loop.index == 1 -%}
-            {%- set create_target_relation_sql -%}
-                select {{ dest_cols_csv }}
-                from {{ tmp_relation }}
-                where {{ batch }}
-            {%- endset -%}
-            {%- do run_query(create_table_as(temporary, relation, create_target_relation_sql, language)) -%}
-        {%- else -%}
-            {%- set insert_batch_partitions_sql -%}
-                insert into {{ relation }} ({{ dest_cols_csv }})
-                select {{ dest_cols_csv }}
-                from {{ tmp_relation }}
-                where {{ batch }}
-            {%- endset -%}
-
-            {%- do run_query(insert_batch_partitions_sql) -%}
-        {%- endif -%}
-
-
-    {%- endfor -%}
-
-    {%- do drop_relation(tmp_relation) -%}
-
-    select 'SUCCESSFULLY CREATED TABLE {{ relation }}'
-
+  {%- do drop_relation(tmp_relation) -%}
 {%- endmacro %}
 
 {% macro safe_create_table_as(temporary, relation, compiled_code, language='sql', force_batch=False) -%}
-    {%- if language != 'sql' -%}
-        {{ return(create_table_as(temporary, relation, compiled_code, language)) }}
-    {%- elif force_batch -%}
-      {%- do create_table_as_with_partitions(temporary, relation, compiled_code, language) -%}
-      {%- set query_result = relation ~ ' with many partitions created' -%}
-    {%- else -%}
-        {%- if temporary -%}
-          {%- do run_query(create_table_as(temporary, relation, compiled_code, language, true)) -%}
-          {%- set compiled_code_result = relation ~ ' as temporary relation without partitioning created' -%}
-        {%- else -%}
-          {%- set compiled_code_result = adapter.run_query_with_partitions_limit_catching(create_table_as(temporary, relation, compiled_code)) -%}
-          {%- do log('COMPILED CODE RESULT: ' ~ compiled_code_result) -%}
-          {%- if compiled_code_result == 'TOO_MANY_OPEN_PARTITIONS' -%}
-            {%- do create_table_as_with_partitions(temporary, relation, compiled_code, language) -%}
-            {%- set compiled_code_result = relation ~ ' with many partitions created' -%}
-          {%- endif -%}
-        {%- endif -%}
-    {%- endif -%}
-    {{ return(compiled_code_result) }}
+  {%- if language != 'sql' -%}
+    {{ return(create_table_as(temporary, relation, compiled_code, language)) }}
+  {%- endif -%}
+
+  {%- if force_batch -%}
+    {%- do create_table_as_with_partitions(temporary, relation, compiled_code, language) -%}
+    {{ return(relation ~ ' with many partitions created') }}
+  {%- endif -%}
+
+  {%- if temporary -%}
+    {%- do run_query(create_table_as(temporary, relation, compiled_code, language, true)) -%}
+    {{ return(relation ~ ' as temporary relation without partitioning created') }}
+  {%- endif -%}
+
+  {%- set result = adapter.run_query_with_partitions_limit_catching(create_table_as(temporary, relation, compiled_code)) -%}
+  {%- do log('COMPILED CODE RESULT: ' ~ result) -%}
+  {%- if result != 'TOO_MANY_OPEN_PARTITIONS' -%}
+    {{ return(result) }}
+  {%- endif -%}
+
+  {#- A failed CTAS leaves the table registered in S3 Tables; the first batch's CTAS would hit it. -#}
+  {%- if adapter.is_s3_tables_database(relation.database) -%}
+    {%- do drop_relation(relation) -%}
+  {%- endif -%}
+
+  {%- do create_table_as_with_partitions(temporary, relation, compiled_code, language) -%}
+  {{ return(relation ~ ' with many partitions created') }}
 {%- endmacro %}
