@@ -1562,6 +1562,45 @@ class AthenaAdapter(SQLAdapter):
                 raise e
 
     @available
+    def rename_s3_tables_relation(
+        self, from_relation: AthenaRelation, to_relation: AthenaRelation
+    ) -> None:
+        conn = self.connections.get_thread_connection()
+        creds = conn.credentials
+        client = conn.handle
+
+        bucket = from_relation.database.split("/", 1)[1]  # type:ignore
+        bucket_arn = (
+            f"arn:aws:s3tables:{client.region_name}:{self._get_aws_account_id()}:bucket/{bucket}"
+        )
+
+        with boto3_client_lock:
+            s3tables_client = client.session.client(
+                "s3tables",
+                region_name=client.region_name,
+                config=get_boto3_config(num_retries=creds.effective_num_retries),
+            )
+
+        table = s3tables_client.get_table(
+            tableBucketARN=bucket_arn,
+            namespace=from_relation.schema,
+            name=from_relation.identifier,
+        )
+
+        rename_kwargs = dict(
+            tableBucketARN=bucket_arn,
+            namespace=from_relation.schema,
+            name=from_relation.identifier,
+            newName=to_relation.identifier,
+            versionToken=table["versionToken"],
+        )
+        if to_relation.schema != from_relation.schema:
+            rename_kwargs["newNamespaceName"] = to_relation.schema
+
+        s3tables_client.rename_table(**rename_kwargs)
+        LOGGER.debug(f"Renamed S3 table {from_relation.render()} to {to_relation.render()}")
+
+    @available
     def drop_glue_database(self, database_name: str, catalog_name: str = "awsdatacatalog") -> None:
         conn = self.connections.get_thread_connection()
         creds = conn.credentials

@@ -100,16 +100,20 @@
         {% endcall %}
       {%- endif -%}
     {%- elif adapter.is_s3_tables_database(database) -%}
-      -- S3 Tables manages its own storage and does not support ALTER TABLE RENAME, so the
-      -- near-zero-downtime swap used for Glue Iceberg is not possible. Drop the existing
-      -- table (via SQL) and recreate it directly.
-      {%- do drop_relation(old_relation) -%}
-      {%- set query_result = safe_create_table_as(False, target_relation, compiled_code, language, force_batch) -%}
-      {%- if language == 'python' -%}
-        {% call statement('create_table', language=language) %}
-          {{ query_result }}
-        {% endcall %}
+      -- Athena has no ALTER TABLE RENAME in S3 Tables catalogs, so the swap renames through the S3 Tables API.
+      {%- if old_tmp_relation is not none -%}
+        {%- do drop_relation(old_tmp_relation) -%}
       {%- endif -%}
+      {%- if old_bkp_relation is not none -%}
+        {%- do drop_relation(old_bkp_relation) -%}
+      {%- endif -%}
+
+      {%- set query_result = safe_create_table_as(False, tmp_relation, compiled_code, language, force_batch) -%}
+
+      {%- set old_relation_bkp = make_temp_relation(old_relation, '__bkp') -%}
+      {%- do adapter.rename_s3_tables_relation(old_relation, old_relation_bkp) -%}
+      {%- do adapter.rename_s3_tables_relation(tmp_relation, target_relation) -%}
+      {%- do drop_relation(old_relation_bkp) -%}
     {%- else -%}
       {%- if old_relation.is_view -%}
         {%- set query_result = safe_create_table_as(False, tmp_relation, compiled_code, language, force_batch) -%}
