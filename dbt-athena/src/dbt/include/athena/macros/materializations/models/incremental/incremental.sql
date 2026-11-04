@@ -69,6 +69,7 @@
   {%- elif (
     should_full_refresh()
     and table_type == 'iceberg'
+    and not adapter.is_s3_tables_database(target_relation.database)
     and ('unique' not in s3_data_naming or external_location is not none)
   ) -%}
     -- create a new tmp_relation that has its s3 path set to the target location path

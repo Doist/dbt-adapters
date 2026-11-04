@@ -246,6 +246,11 @@ class TestAthenaS3TablesIncremental(BaseS3TablesCatalog):
         assert len(run_dbt(["run"])) == 1
         assert project.run_sql(f"select count(*) from {rel}", fetch="one")[0] == 2
 
+        # Full refresh: S3 Tables rejects ALTER TABLE RENAME, so no rename swap.
+        _, stdout = run_dbt_and_capture(["--debug", "run", "--full-refresh"])
+        assert "rename to" not in stdout
+        assert project.run_sql(f"select count(*) from {rel}", fetch="one")[0] == 1
+
 
 class TestAthenaS3TablesSnapshot(BaseS3TablesCatalog):
     @pytest.fixture(scope="class")
