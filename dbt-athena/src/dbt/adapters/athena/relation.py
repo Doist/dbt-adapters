@@ -86,11 +86,11 @@ class AthenaRelation(BaseRelation):
         """
         filter = ""
         if event_time_filter.start and event_time_filter.end:
-            filter = f"cast({event_time_filter.field_name} as timestamp) >= timestamp '{event_time_filter.start}' and cast({event_time_filter.field_name} as timestamp) < timestamp '{event_time_filter.end}'"
+            filter = f"{event_time_filter.field_name} >= timestamp '{event_time_filter.start}' and {event_time_filter.field_name} < timestamp '{event_time_filter.end}'"
         elif event_time_filter.start:
-            filter = f"cast({event_time_filter.field_name} as timestamp) >= timestamp '{event_time_filter.start}'"
+            filter = f"{event_time_filter.field_name} >= timestamp '{event_time_filter.start}'"
         elif event_time_filter.end:
-            filter = f"cast({event_time_filter.field_name} as timestamp) < timestamp'{event_time_filter.end}'"
+            filter = f"{event_time_filter.field_name} < timestamp '{event_time_filter.end}'"
 
         return filter
 

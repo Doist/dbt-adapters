@@ -1,6 +1,9 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from dbt.adapters.athena.relation import AthenaRelation, TableType, get_table_type
+from dbt.adapters.base.relation import EventTimeFilter
 
 from .constants import DATA_CATALOG_NAME, DATABASE_NAME
 
@@ -84,3 +87,33 @@ class TestAthenaRelation:
             schema=DATABASE_NAME,
         )
         assert relation.render_pure() == f"{DATA_CATALOG_NAME}.{DATABASE_NAME}.{TABLE_NAME}"
+
+    @pytest.mark.parametrize(
+        ("start", "end", "expected"),
+        [
+            (
+                datetime(2026, 8, 25, tzinfo=timezone.utc),
+                datetime(2026, 8, 28, tzinfo=timezone.utc),
+                "ts >= timestamp '2026-08-25 00:00:00+00:00' and ts < timestamp '2026-08-28 00:00:00+00:00'",
+            ),
+            (
+                datetime(2026, 8, 25, tzinfo=timezone.utc),
+                None,
+                "ts >= timestamp '2026-08-25 00:00:00+00:00'",
+            ),
+            (
+                None,
+                datetime(2026, 8, 28, tzinfo=timezone.utc),
+                "ts < timestamp '2026-08-28 00:00:00+00:00'",
+            ),
+            (None, None, ""),
+        ],
+    )
+    def test_render_event_time_filtered_leaves_column_uncast(self, start, end, expected):
+        relation = AthenaRelation.create(
+            identifier=TABLE_NAME,
+            database=DATA_CATALOG_NAME,
+            schema=DATABASE_NAME,
+        )
+        event_time_filter = EventTimeFilter(field_name="ts", start=start, end=end)
+        assert relation._render_event_time_filtered(event_time_filter) == expected

@@ -1,0 +1,7 @@
+kind: Fixes
+body: Render the event time filter without casting the column, so sample mode and microbatch
+  prune Iceberg partitions
+time: 2026-10-01T12:00:00.000000+00:00
+custom:
+  Author: giuliano
+  Issue: "TBD"
