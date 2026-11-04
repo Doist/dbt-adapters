@@ -63,6 +63,16 @@
     {%- endif -%}
     {% set build_sql = "select '" ~ query_result ~ "'" -%}
 
+  -- S3 Tables full refresh: replace the rows in place and keep the table object --
+  {%- elif (
+    should_full_refresh()
+    and model_language == 'sql'
+    and adapter.is_s3_tables_database(target_relation.database)
+  ) -%}
+    {%- do drop_relation(make_temp_relation(target_relation, '__dbt_tmp')) -%}
+    {%- set replaced = s3_tables_replace(target_relation, compiled_code, false, force_batch) -%}
+    {% set build_sql = "select 'full refresh by " ~ replaced.mode ~ ": " ~ replaced.query_result ~ "'" -%}
+
   -- Running in full refresh, support High Availability for Iceberg table type --
   -- Must use s3_data_naming schema_table_unique in order to support high availability --
   -- on a full fresh for an incremental iceberg table --
