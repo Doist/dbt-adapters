@@ -1389,6 +1389,29 @@ class TestAthenaAdapter:
         assert sorted(res) == ["bar", "foo", "quux"]
 
     @mock_aws
+    @pytest.mark.parametrize(
+        ("database", "catalog_id"),
+        [
+            ('"s3tablescatalog/my-bucket"', "123456789012:s3tablescatalog/my-bucket"),
+            ('"awsdatacatalog"', "123456789012"),
+        ],
+    )
+    def test_list_schemas_reads_the_catalog_it_is_given(
+        self, mock_aws_service, database, catalog_id
+    ):
+        self.adapter.acquire_connection("dummy")
+        self.adapter._aws_account_id = "123456789012"
+        calls = []
+
+        def mock_make_api_call(self, operation_name, api_params):
+            calls.append((operation_name, api_params))
+            return {"DatabaseList": [{"Name": "ns"}]}
+
+        with patch.object(botocore.client.BaseClient, "_make_api_call", mock_make_api_call):
+            assert self.adapter.list_schemas(database) == ["ns"]
+        assert calls == [("GetDatabases", {"CatalogId": catalog_id})]
+
+    @mock_aws
     def test_check_schema_exists(self, mock_aws_service):
         mock_aws_service.create_data_catalog()
         mock_aws_service.create_database(name="existing_schema")

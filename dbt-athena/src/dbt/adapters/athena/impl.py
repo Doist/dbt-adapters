@@ -1426,9 +1426,16 @@ class AthenaAdapter(SQLAdapter):
                 config=get_boto3_config(num_retries=creds.effective_num_retries),
             )
 
+        kwargs: Dict[str, str] = {}
+        data_catalog = self._get_data_catalog(
+            (database or "").strip(self.Relation.quote_character)
+        )
+        if catalog_id := get_catalog_id(data_catalog):
+            kwargs["CatalogId"] = catalog_id
+
         paginator = glue_client.get_paginator("get_databases")
         result = []
-        for page in paginator.paginate():
+        for page in paginator.paginate(**kwargs):
             result.extend([schema["Name"] for schema in page["DatabaseList"]])
         return result
 
