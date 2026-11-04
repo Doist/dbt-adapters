@@ -99,21 +99,14 @@
           {{ query_result }}
         {% endcall %}
       {%- endif -%}
-    {%- elif adapter.is_s3_tables_database(database) -%}
-      -- Athena has no ALTER TABLE RENAME in S3 Tables catalogs, so the swap renames through the S3 Tables API.
-      {%- if old_tmp_relation is not none -%}
-        {%- do drop_relation(old_tmp_relation) -%}
-      {%- endif -%}
-      {%- if old_bkp_relation is not none -%}
-        {%- do drop_relation(old_bkp_relation) -%}
-      {%- endif -%}
-
-      {%- set query_result = safe_create_table_as(False, tmp_relation, compiled_code, language, force_batch) -%}
-
-      {%- set old_relation_bkp = make_temp_relation(old_relation, '__bkp') -%}
-      {%- do adapter.rename_s3_tables_relation(old_relation, old_relation_bkp) -%}
-      {%- do adapter.rename_s3_tables_relation(tmp_relation, target_relation) -%}
-      {%- do drop_relation(old_relation_bkp) -%}
+    {%- elif adapter.is_s3_tables_database(database) and language == 'sql' -%}
+      {%- set replaced = s3_tables_replace(
+            target_relation,
+            compiled_code,
+            force_rebuild=var('s3_tables_rebuild', false) | as_bool,
+            force_batch=force_batch
+      ) -%}
+      {%- set query_result = replaced.mode ~ ': ' ~ replaced.query_result -%}
     {%- else -%}
       {%- if old_relation.is_view -%}
         {%- set query_result = safe_create_table_as(False, tmp_relation, compiled_code, language, force_batch) -%}

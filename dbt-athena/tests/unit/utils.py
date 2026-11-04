@@ -1,14 +1,72 @@
 import os
+import re
 import string
+from types import SimpleNamespace
 from typing import Optional
 
 import agate
 import boto3
+import jinja2
 
 from dbt.adapters.athena.utils import AthenaCatalogType
 from dbt.config.project import PartialProject
 
 from .constants import AWS_REGION, BUCKET, CATALOG_ID, DATA_CATALOG_NAME, DATABASE_NAME
+
+
+MACROS_DIR = os.path.normpath(
+    os.path.join(
+        os.path.dirname(__file__),
+        os.pardir,
+        os.pardir,
+        "src",
+        "dbt",
+        "include",
+        "athena",
+        "macros",
+    )
+)
+
+
+class _MacroReturn(Exception):
+    def __init__(self, value):
+        self.value = value
+
+
+def _raise_return(value):
+    raise _MacroReturn(value)
+
+
+def _returning(func):
+    def wrapper(*args):
+        try:
+            return func(*args)
+        except _MacroReturn as returned:
+            return returned.value
+
+    return wrapper
+
+
+def macro_caller(path, **context):
+    """Load a macro file with plain jinja2 and return a function that calls one of its
+    macros by name. As in dbt, return() ends the macro and gives the macro's value."""
+    context = {"modules": SimpleNamespace(re=re), "return": _raise_return, **context}
+    directory, file_name = os.path.split(os.path.join(MACROS_DIR, path))
+    env = jinja2.Environment(
+        loader=jinja2.FileSystemLoader(directory), extensions=["jinja2.ext.do"]
+    )
+    env.filters["as_bool"] = bool
+    module = env.get_template(file_name, globals=context).module
+
+    for name in dir(module):
+        macro = getattr(module, name)
+        if isinstance(macro, jinja2.runtime.Macro):
+            macro._func = _returning(macro._func)
+
+    def call(name, *args, **kwargs):
+        return getattr(module, name)(*args, **kwargs)
+
+    return call
 
 
 class Obj:
