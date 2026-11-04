@@ -12,9 +12,10 @@
   {%- set bucket_count = config.get('bucket_count', default=none) -%}
   {%- set field_delimiter = config.get('field_delimiter', default=none) -%}
   {%- set catalog_relation = adapter.build_catalog_relation(config.model) -%}
-  {%- set table_type = resolve_table_type() -%}
+  {%- set table_type = resolve_table_type(relation) -%}
   {# S3 Tables manages storage automatically — no explicit location in DDL #}
-  {%- set is_s3_tables = catalog_relation is not none and catalog_relation.catalog_type == 's3_tables' -%}
+  {%- set is_s3_tables = adapter.is_s3_tables_database(relation.database)
+        or (catalog_relation is not none and catalog_relation.catalog_type == 's3_tables') -%}
   {# format: model `format` config > catalog file_format > parquet #}
   {%- set catalog_file_format = catalog_relation.file_format if catalog_relation is not none else none -%}
   {%- set format = config.get('format', default=none) or catalog_file_format or 'parquet' -%}

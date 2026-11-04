@@ -167,6 +167,32 @@ select 1 as id, '{{ var("snap_val", "a") }}' as val
 {% endsnapshot %}
 """
 
+MODEL__UNIT_PARENT = """
+{{ config(materialized='table', catalog_name='s3_tables_catalog') }}
+select 1 as id, cast(timestamp '2026-08-27 10:00:00.123456' as timestamp(6)) as event_at
+"""
+
+MODEL__UNIT_CHILD = """
+{{ config(materialized='table', catalog_name='s3_tables_catalog') }}
+select id, event_at from {{ ref('s3t_unit_parent') }} where id > 0
+"""
+
+UNIT_TESTS__YML = """
+unit_tests:
+  - name: s3t_unit_child_filters
+    model: s3t_unit_child
+    given:
+      - input: ref('s3t_unit_parent')
+        format: sql
+        rows: |
+          select 1 as id, cast(timestamp '2026-08-27 10:00:00.123456' as timestamp(6)) as event_at
+          union all
+          select 0, cast(timestamp '2026-08-01 10:00:00' as timestamp(6))
+    expect:
+      rows:
+        - {id: 1, event_at: "2026-08-27 10:00:00.123456"}
+"""
+
 
 class TestAthenaS3TablesTable(BaseS3TablesCatalog):
     @pytest.fixture(scope="class")
@@ -248,3 +274,25 @@ class TestAthenaS3TablesSnapshot(BaseS3TablesCatalog):
         # Flip the value -> check strategy records a new version via MERGE.
         assert len(run_dbt(["snapshot", "--vars", '{"snap_val": "b"}'])) == 1
         assert self._snap_count(project, database, namespace) == 2
+
+
+class TestAthenaS3TablesUnitTest(BaseS3TablesCatalog):
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "s3t_unit_parent.sql": MODEL__UNIT_PARENT,
+            "s3t_unit_child.sql": MODEL__UNIT_CHILD,
+            "unit_tests.yml": UNIT_TESTS__YML,
+        }
+
+    def test_unit_test_probe_is_iceberg(self, project, catalogs, s3_tables_infra, namespace):
+        write_config_file(catalogs, project.project_root, "catalogs.yml")
+
+        # Unit test nodes carry no catalog_name: the probe's database alone must decide.
+        results, stdout = run_dbt_and_capture(["--debug", "test", "--select", "test_type:unit"])
+        assert len(results) == 1
+        assert "table_type='hive'" not in stdout
+        probe = "s3t_unit_child_filters__dbt_tmp"
+        assert self._table_type(s3_tables_infra, namespace, probe) is None
+
+        assert len(run_dbt(["build"])) == 3
