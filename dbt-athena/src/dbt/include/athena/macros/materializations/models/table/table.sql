@@ -184,6 +184,8 @@
     {{ adapter.apply_lf_grants(target_relation, lf_grants) }}
   {% endif %}
 
+  {% do adapter.apply_s3_tables_table_config(target_relation, config.get('s3_tables_table_config')) %}
+
   {% do persist_docs(target_relation, model) %}
 
   {{ return({'relations': [target_relation]}) }}

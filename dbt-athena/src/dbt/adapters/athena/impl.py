@@ -144,6 +144,8 @@ class AthenaConfig(AdapterConfig):
         force_batch: Skip creating the table as ctas and run the operation directly in batch insert mode.
         unique_tmp_table_suffix: Enforce the use of a unique id as tmp table suffix instead of __dbt_tmp.
         temp_schema: Define in which schema to create temporary tables used in incremental runs.
+        s3_tables_table_config: S3 Tables maintenance settings, tags and sort order to apply
+            to the table after every build.
     """
 
     work_group: Optional[str] = None
@@ -167,6 +169,7 @@ class AthenaConfig(AdapterConfig):
     force_batch: bool = False
     unique_tmp_table_suffix: bool = False
     temp_schema: Optional[str] = None
+    s3_tables_table_config: Optional[Dict[str, Any]] = None
 
 
 class AthenaAdapter(SQLAdapter):
@@ -336,6 +339,98 @@ class AthenaAdapter(SQLAdapter):
             lf_permissions = LfPermissions(catalog_id, relation, lf)  # type: ignore
             lf_permissions.process_filters(lf_config)
             lf_permissions.process_permissions(lf_config)
+
+    @available
+    def apply_s3_tables_table_config(
+        self, relation: AthenaRelation, table_config: Optional[Dict[str, Any]]
+    ) -> None:
+        if not table_config or not self.is_s3_tables_database(relation.database):
+            return
+
+        conn = self.connections.get_thread_connection()
+        creds = conn.credentials
+        client = conn.handle
+        with boto3_client_lock:
+            s3tables = client.session.client(
+                "s3tables",
+                region_name=client.region_name,
+                config=get_boto3_config(num_retries=creds.effective_num_retries),
+            )
+
+        account_id = self._get_aws_account_id()
+        bucket = relation.database.split("/", 1)[1]  # type: ignore
+        bucket_arn = f"arn:aws:s3tables:{client.region_name}:{account_id}:bucket/{bucket}"
+        table_kwargs = dict(
+            tableBucketARN=bucket_arn, namespace=relation.schema, name=relation.identifier
+        )
+
+        response = s3tables.get_table_maintenance_configuration(**table_kwargs)
+        for maintenance_type in ("icebergCompaction", "icebergSnapshotManagement"):
+            wanted = table_config.get(maintenance_type)
+            if wanted is not None and response["configuration"].get(maintenance_type) != wanted:
+                LOGGER.debug(f"Setting {maintenance_type} on {relation}")
+                s3tables.put_table_maintenance_configuration(
+                    **table_kwargs, type=maintenance_type, value=wanted
+                )
+
+        if tags := table_config.get("tags"):
+            s3tables.tag_resource(resourceArn=response["tableARN"], tags=tags)
+
+        if sort_order := table_config.get("sort_order"):
+            self._set_s3_tables_sort_order(client, account_id, bucket, relation, sort_order)
+
+    @staticmethod
+    def _set_s3_tables_sort_order(
+        client: Any,
+        account_id: str,
+        bucket: str,
+        relation: AthenaRelation,
+        sort_order: List[Dict[str, str]],
+    ) -> None:
+        try:
+            from pyiceberg.catalog import load_catalog
+            from pyiceberg.table.sorting import NullOrder
+            from pyiceberg.transforms import IdentityTransform
+        except ImportError:
+            raise DbtRuntimeError("s3_tables_table_config.sort_order needs pyiceberg installed")
+
+        credentials = client.session.get_credentials().get_frozen_credentials()
+        catalog = load_catalog(
+            f"s3tables_{bucket}",
+            **{
+                "type": "rest",
+                "uri": f"https://glue.{client.region_name}.amazonaws.com/iceberg",
+                "warehouse": f"{account_id}:s3tablescatalog/{bucket}",
+                "rest.sigv4-enabled": "true",
+                "rest.signing-name": "glue",
+                "rest.signing-region": client.region_name,
+                "client.region": client.region_name,
+                "client.access-key-id": credentials.access_key,
+                "client.secret-access-key": credentials.secret_key,
+                "client.session-token": credentials.token,
+            },
+        )
+        table = catalog.load_table((relation.schema, relation.identifier))
+
+        current = [
+            (table.schema().find_column_name(f.source_id), f.direction.value, f.null_order.value)
+            for f in table.sort_order().fields
+        ]
+        wanted = [
+            (f["column"], f.get("direction", "asc"), f.get("nulls", "nulls-first"))
+            for f in sort_order
+        ]
+        if current == wanted:
+            return
+
+        with table.update_sort_order() as update:
+            for field in sort_order:
+                add = update.desc if field.get("direction") == "desc" else update.asc
+                add(
+                    field["column"],
+                    IdentityTransform(),
+                    NullOrder(field.get("nulls", "nulls-first")),
+                )
 
     @lru_cache()
     def _get_work_group(self, work_group: str) -> GetWorkGroupOutputTypeDef:
